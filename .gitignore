@@ -1,0 +1,10 @@
+/target/
+/reports/
+__pycache__/
+# lab working dirs: copied sources, build dirs, stores, results
+/lab/src/
+/lab/t/
+/lab/messy/
+/lab/store/
+/lab/bench-store/
+/lab/results/
