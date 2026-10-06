@@ -163,11 +163,24 @@ pub fn wait(store_root: &Path) -> Duration {
 }
 
 /// This thread yields to compiles: on Apple Silicon, background QoS runs it
-/// on the efficiency cores.
+/// on the efficiency cores; on Linux, lowest CPU and idle IO priority.
 pub fn background_qos() {
     #[cfg(target_os = "macos")]
     // SAFETY: sets the calling thread's own QoS class; no pointers involved.
     unsafe {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
+    }
+    #[cfg(target_os = "linux")]
+    // SAFETY: plain syscalls on the calling process; no pointers involved.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+        const IOPRIO_WHO_PROCESS: libc::c_int = 1;
+        const IOPRIO_CLASS_IDLE: libc::c_int = 3;
+        libc::syscall(
+            libc::SYS_ioprio_set,
+            IOPRIO_WHO_PROCESS,
+            0,
+            IOPRIO_CLASS_IDLE << 13,
+        );
     }
 }

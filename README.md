@@ -9,8 +9,9 @@ artifacts) and keeps Rust builds moving: Cargo plans the build, Oak Oil
 executes it against a content-addressed store, and the output is
 byte-identical to what stock Cargo would produce.
 
-> **Status: experimental.** macOS only (Apple Silicon tested), Rust 1.95.
-> Verified on four real workspaces; not yet on yours. Stock Cargo keeps
+> **Status: experimental.** macOS (Apple Silicon tested) and Linux (new:
+> btrfs, ext4 and XFS checked), Rust 1.95. Verified on four real workspaces
+> on macOS; not yet on yours. Stock Cargo keeps
 > working on the same target dir at any time.
 
 ## What it does
@@ -61,7 +62,8 @@ recompiled nothing. More detail: [docs/findings.md](docs/findings.md).
    mtime, inode) is skipped without reading anything. A changed unit gets a
    content key: rustc version, command, env, dependency contents, and the
    sources from rustc's own dep-info. A key in the store is restored
-   (APFS clone); a miss runs stock rustc.
+   (a clone on APFS, btrfs and XFS; a copy elsewhere); a miss runs stock
+   rustc.
 4. **Compatibility.** Cargo's fingerprints, build-script outputs and
    dep-info are restored in the order Cargo's checks expect, so a later
    plain `cargo build` finds everything fresh.
@@ -69,6 +71,28 @@ recompiled nothing. More detail: [docs/findings.md](docs/findings.md).
 Library artifacts from registry and git crates are shared across projects.
 Linked outputs and workspace crates are per project, because macOS debug
 maps and dep-info hold absolute paths.
+
+### On Linux, the filesystem matters
+
+The store costs almost no disk where files can share blocks (btrfs, XFS
+with reflink, APFS). On ext4 every stored output is a real copy: builds
+are as fast, but the store adds disk instead of sharing it. Measured on
+ripgrep 14.1.1 (Linux, 16 threads, low priority on a busy machine):
+
+| | btrfs | ext4 |
+| --- | --- | --- |
+| Stock `cargo build`, cold | 6.47 s | 6.47 s |
+| `cargo oil build`, cold | 6.68 s | 6.62 s |
+| No-change build | 0.05 s | 0.05 s |
+| After `rm -rf target` | 0.28 s | 0.37 s |
+| Disk: stock target dir | 332 MiB | 330 MiB |
+| Disk: target dir + store | 336 MiB | 540 MiB |
+
+Hardlinks would avoid the copies on ext4 but are not used: projects would
+share one inode and its mtime, so restoring in one project would make
+stock Cargo rebuild in another, and an in-place write would change the
+store. Keep the store and your target dirs on the same filesystem; `gc`
+bounds the store's size.
 
 ## Verifying it
 
@@ -96,12 +120,16 @@ The store lives in `~/.oakoil` (or `$OAKOIL_HOME`) and can be deleted.
 `OAKOIL_GC_MAX_AGE_DAYS` and `OAKOIL_GC_MAX_SIZE` (e.g. `20G`);
 `OAKOIL_GC=off` stops the daily automatic run. Removing an object never
 breaks a build: a unit that needed it compiles again, and missing Cargo
-state is recorded again through Cargo. Target dirs share blocks with the
-store through APFS clones, so the disk can gain less than `gc` reports.
+state is recorded again through Cargo. Where target dirs share blocks with
+the store (APFS, btrfs, XFS), the disk can gain less than `gc` reports.
 
 ## Limitations
 
-- macOS only: uses `nm` debug maps, APFS clones, xattrs and thread QoS.
+- macOS and Linux only. On Linux, `split-debuginfo` other than Cargo's
+  default (`off`) falls back to a slower scan for a unit's object files.
+- Linux is new: CI checks it on ext4, and btrfs and XFS were checked by
+  hand, but no real workspace has had the full byte-identity check there
+  yet.
 - `cargo oil clean` runs your Cargo commands to find live units, which
   brings out-of-date profiles up to date first.
 - Early cutoff after a private-code edit is limited: rustc stores source
@@ -115,9 +143,10 @@ cargo binstall cargo-oil       # or: download the prebuilt binary of the release
 cargo oil build
 ```
 
-Prebuilt binaries (Apple Silicon and Intel) are on the
+Prebuilt macOS binaries (Apple Silicon and Intel) are on the
 [releases page](https://github.com/oakoliver/oak-oil/releases); `cargo binstall`
-fetches them from there.
+fetches them from there. Linux support is on `main` and not released yet:
+`cargo install --git https://github.com/oakoliver/oak-oil cargo-oil`.
 
 ## Where releases come from
 

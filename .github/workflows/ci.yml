@@ -36,3 +36,27 @@ jobs:
 
       - name: Oracle (byte-identical to stock Cargo)
         run: python3 ci/oracle.py target/release/cargo-oil
+
+  # Same checks on Linux. GitHub's Ubuntu runners use ext4: no reflinks, so
+  # this also covers the store's plain-copy path. (btrfs and XFS were
+  # checked by hand; see README.)
+  check-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup default "$RUST_VERSION"
+          rustc -vV
+
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --release -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+
+      - name: Oracle (byte-identical to stock Cargo)
+        run: python3 ci/oracle.py target/release/cargo-oil

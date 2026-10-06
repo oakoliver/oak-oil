@@ -9,7 +9,7 @@ use crate::unit::{Ctx, Echo, Jobserver, Outcome, Record, load_record, record_key
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
 use std::time::SystemTime;
 
@@ -362,8 +362,7 @@ fn uplift(
             if let Some(parent) = dst.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(rec.out_dir.join(o), dst)?;
-            File::options().write(true).open(dst)?.set_modified(now)?;
+            uplift_file(&rec.out_dir.join(o), dst, now)?;
         }
     }
     Ok(())
@@ -393,4 +392,14 @@ fn restore_err(e: std::io::Error) -> ExecError {
     } else {
         ExecError::Io(e)
     }
+}
+
+/// Cargo's own uplift: a hardlink on Linux, a clone stamped now on macOS.
+fn uplift_file(src: &Path, dst: &Path, now: SystemTime) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if fs::hard_link(src, dst).is_ok() {
+        return Ok(());
+    }
+    fs::copy(src, dst)?;
+    File::options().write(true).open(dst)?.set_modified(now)
 }

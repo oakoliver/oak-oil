@@ -132,7 +132,10 @@ impl HashCache {
     }
 }
 
+#[cfg(target_os = "macos")]
 const XATTR: &[u8] = b"dev.oakoil.b3\0";
+#[cfg(target_os = "linux")]
+const XATTR: &[u8] = b"user.oakoil.b3\0";
 
 fn cpath(p: &Path) -> Option<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
@@ -143,6 +146,7 @@ fn xattr_get(p: &Path) -> Option<(Stamp, String)> {
     let c = cpath(p)?;
     let mut buf = [0u8; 256];
     // SAFETY: valid NUL-terminated path and name, buffer of the given size.
+    #[cfg(target_os = "macos")]
     let n = unsafe {
         libc::getxattr(
             c.as_ptr(),
@@ -151,6 +155,15 @@ fn xattr_get(p: &Path) -> Option<(Stamp, String)> {
             buf.len(),
             0,
             libc::XATTR_NOFOLLOW,
+        )
+    };
+    #[cfg(target_os = "linux")]
+    let n = unsafe {
+        libc::lgetxattr(
+            c.as_ptr(),
+            XATTR.as_ptr().cast(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
         )
     };
     if n <= 0 {
@@ -172,6 +185,7 @@ fn xattr_set(p: &Path, s: &Stamp, h: &str) {
     let v = format!("{}:{}:{}:{}:{h}", s.len, s.mtime, s.mtime_ns, s.ino);
     // SAFETY: valid NUL-terminated path and name; value pointer and length match.
     // Setting an xattr does not change mtime; failures (read-only files) are ignored.
+    #[cfg(target_os = "macos")]
     unsafe {
         libc::setxattr(
             c.as_ptr(),
@@ -180,6 +194,16 @@ fn xattr_set(p: &Path, s: &Stamp, h: &str) {
             v.len(),
             0,
             libc::XATTR_NOFOLLOW,
+        );
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::lsetxattr(
+            c.as_ptr(),
+            XATTR.as_ptr().cast(),
+            v.as_ptr().cast(),
+            v.len(),
+            0,
         );
     }
 }

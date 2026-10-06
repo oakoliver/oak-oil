@@ -1,9 +1,8 @@
 //! `cargo oil` — Oak Oil: lean, fast Rust builds.
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 compile_error!(
-    "Oak Oil currently supports macOS only: it relies on APFS clones, Mach-O debug maps and xattrs. \
-     See https://github.com/oakoliver/oak-oil#limitations"
+    "Oak Oil supports macOS and Linux. See https://github.com/oakoliver/oak-oil#limitations"
 );
 
 mod cargo_msgs;

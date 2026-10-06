@@ -10,7 +10,6 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Member names of an `ar` archive (rlib), BSD or GNU layout.
 pub fn ar_members(path: &Path) -> io::Result<Vec<String>> {
@@ -65,8 +64,24 @@ pub fn ar_members(path: &Path) -> io::Result<Vec<String>> {
 
 /// Object files a linked Mach-O binary's debug map points to (`nm -ap`,
 /// `OSO` entries). `None` when the map cannot be read.
+#[cfg(target_os = "linux")]
 pub fn debug_map_objects(path: &Path) -> Option<Vec<PathBuf>> {
-    let out = Command::new("nm").arg("-ap").arg(path).output().ok()?;
+    // ELF builds keep debug info inside the binary (Cargo's default
+    // split-debuginfo=off on Linux): no object files are left beside it.
+    // With packed/unpacked split debuginfo, fall back to the mtime scan.
+    let _ = path;
+    let split = std::env::var("CARGO_PROFILE_DEV_SPLIT_DEBUGINFO").is_ok()
+        || std::env::var("CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO").is_ok();
+    (!split).then(Vec::new)
+}
+
+#[cfg(target_os = "macos")]
+pub fn debug_map_objects(path: &Path) -> Option<Vec<PathBuf>> {
+    let out = std::process::Command::new("nm")
+        .arg("-ap")
+        .arg(path)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
