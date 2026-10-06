@@ -11,6 +11,7 @@ mod clean;
 mod depinfo;
 mod drain;
 mod exec;
+mod gc;
 mod hashing;
 mod measure;
 mod objects;
@@ -39,6 +40,10 @@ Usage:
       for the commands (default: build, test --no-run, build --release when a
       release dir exists). Re-checks that Cargo then recompiles nothing.
       --other-dirs also removes dirs in target/ no command uses.
+  cargo oil gc [--max-age-days N] [--max-size SIZE] [--dry-run]
+      Trim the store (~/.oakoil): objects unused for N days (default 30),
+      then least recently used until it fits SIZE (default 40G). Also runs
+      after builds, at most once a day (OAKOIL_GC=off disables it).
   cargo oil measure [--root DIR]... [--out DIR] [--stale-days N] [--samples N] [--threads N]
       Phase 0: bytes per pain in every Cargo target dir under the roots.";
 
@@ -58,6 +63,7 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("build") => build(&args[1..]),
         Some("clean") => clean_cmd(&args[1..]),
+        Some("gc") => gc_cmd(&args[1..]),
         Some("store-drain") => match args.get(1).map(|f| drain::run(Path::new(f))) {
             Some(Ok(())) => ExitCode::SUCCESS,
             _ => ExitCode::FAILURE,
@@ -95,6 +101,59 @@ fn main() -> ExitCode {
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn gc_cmd(args: &[String]) -> ExitCode {
+    let mut limits = gc::Limits::from_env();
+    let mut dry_run = false;
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value"));
+        let parsed: Result<(), String> = match flag.as_str() {
+            "--dry-run" => {
+                dry_run = true;
+                Ok(())
+            }
+            "--max-age-days" => value().and_then(|v| {
+                let d: u64 = v.parse().map_err(|e| format!("{flag}: {e}"))?;
+                limits.max_age = std::time::Duration::from_secs(d * 86_400);
+                Ok(())
+            }),
+            "--max-size" => value().and_then(|v| {
+                limits.max_bytes = gc::parse_size(v).ok_or(format!("{flag}: bad size {v}"))?;
+                Ok(())
+            }),
+            _ => Err(format!("unknown gc argument {flag}")),
+        };
+        if let Err(e) = parsed {
+            eprintln!("oil: {e}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    }
+    let result = store::Store::open().and_then(|st| {
+        drain::wait(st.root());
+        gc::run(st.root(), &limits, dry_run)
+    });
+    match result {
+        Ok(r) => {
+            eprintln!(
+                "oil: store: {} objects, {}; {} {} objects, {}",
+                r.objects,
+                gc::human(r.bytes),
+                if dry_run { "would remove" } else { "removed" },
+                r.removed,
+                gc::human(r.removed_bytes),
+            );
+            eprintln!(
+                "oil: target dirs share blocks with the store (APFS clones), so the disk can gain less than that."
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("oil: {e}");
+            ExitCode::FAILURE
         }
     }
 }

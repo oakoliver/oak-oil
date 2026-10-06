@@ -13,6 +13,7 @@ Cargo is itself byte-reproducible. Exits non-zero on the first violation.
 4. Stock `cargo build` afterwards recompiles nothing.
 5. An edit, built by Oak Oil, is byte-identical to a stock build of it.
 6. `cargo oil clean --apply` keeps everything Cargo uses.
+7. After `cargo oil gc` empties the store, builds stay byte-identical.
 """
 
 import hashlib
@@ -130,6 +131,23 @@ def main(oil, src):
         if "verified: cargo recompiles nothing" not in out.stdout:
             fail(f"6. clean: {out.stdout.strip()[-500:]} {out.stderr.strip()[-500:]}")
         print("ok: 6. clean kept everything Cargo uses")
+
+        # GC may remove objects a plan still names: builds must stay correct.
+        run([oil, "gc", "--max-size", "0"], ws, env)
+        left = [p for p in (tmp / "store" / "objects").rglob("*") if p.is_file()]
+        if left:
+            fail(f"7. gc --max-size 0 left {len(left)} files in the store")
+        oil_build()
+        for d in target.iterdir():
+            if d.is_dir() and d.name != "oakoil":
+                shutil.rmtree(d)
+        oil_build()
+        got = manifest(target)
+        gc_target = tmp / "oil-after-gc"
+        shutil.copytree(target, gc_target)
+        shutil.rmtree(target)
+        stock()
+        same(manifest(target), got, target, gc_target, "7. build after gc emptied the store")
     print("oracle: all checks passed")
 
 

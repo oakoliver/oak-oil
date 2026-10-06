@@ -1,6 +1,6 @@
 [package]
 name = "cargo-oil"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Oak Oil: lean, fast Rust builds. A Cargo-compatible build executor and content store, with verified cleanup of build residue."
 readme = "README.md"

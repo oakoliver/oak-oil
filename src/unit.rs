@@ -458,6 +458,7 @@ pub fn run_unit(
     phase(1, t_lookup);
     if let Some(e) = found {
         let outcome = if ctx.store.is_present(&e, &inv.out_dir, &ctx.hc) {
+            ctx.store.touch(&e.obj);
             Outcome::Fresh
         } else {
             ctx.store.materialize(&e, &inv.out_dir, t, &ctx.hc)?;

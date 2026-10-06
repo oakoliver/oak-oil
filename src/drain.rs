@@ -133,6 +133,7 @@ fn process(batch: Batch) -> io::Result<()> {
         plan.fill_snapshots(&ctx.store, &ctx.hc)?;
         plan.save(&plan_file)?;
     }
+    crate::gc::auto(ctx.store.root());
     Ok(())
 }
 

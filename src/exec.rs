@@ -101,7 +101,7 @@ pub fn run(plan: &Plan, ctx: &Ctx, jobs: usize) -> Result<Stats, ExecError> {
     let mut restored_runs: Vec<PathBuf> = Vec::new();
     for (dir, obj) in &plan.build_runs {
         if !dir.is_dir() {
-            ctx.store.restore_tree(obj, dir).map_err(ExecError::Io)?;
+            ctx.store.restore_tree(obj, dir).map_err(restore_err)?;
             restored_runs.push(dir.clone());
         }
     }
@@ -338,12 +338,12 @@ pub fn run(plan: &Plan, ctx: &Ctx, jobs: usize) -> Result<Stats, ExecError> {
         if !file.exists() && !obj.is_empty() {
             ctx.store
                 .restore_tree_missing(obj, file.parent().unwrap())
-                .map_err(ExecError::Io)?;
+                .map_err(restore_err)?;
         }
     }
     for (dir, obj) in &plan.fingerprints {
         if !dir.is_dir() {
-            ctx.store.restore_tree(obj, dir).map_err(ExecError::Io)?;
+            ctx.store.restore_tree(obj, dir).map_err(restore_err)?;
         }
     }
     Ok(s.stats)
@@ -383,4 +383,14 @@ fn touch_tree(dir: &std::path::Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A snapshot object `gc` removed means re-planning through Cargo, which
+/// stores it again.
+fn restore_err(e: std::io::Error) -> ExecError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        ExecError::Replan("Cargo state no longer in the store (gc)".into())
+    } else {
+        ExecError::Io(e)
+    }
 }

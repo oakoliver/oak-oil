@@ -20,6 +20,7 @@ byte-identical to what stock Cargo would produce.
 | `cargo oil build [ARGS]` | Builds like `cargo build [ARGS]`. The first run records Cargo's plan; later runs execute it without Cargo, restore unchanged units from the store, and compile the rest with stock rustc. |
 | `cargo oil clean [--apply]` | Finds build residue Cargo will never read again (superseded unit variants, old incremental sessions), removes it with `--apply`, then checks Cargo recompiles nothing. |
 | `cargo oil measure` | Reports bytes per kind of waste across every target dir on the machine. |
+| `cargo oil gc [--max-age-days N] [--max-size SIZE] [--dry-run]` | Trims the store: objects unused for 30 days, then least recently used until it fits 40 GiB. Also runs after builds, at most once a day. |
 | `cargo oil wait-store` | Waits for background store writes to finish. |
 
 ## Results
@@ -74,7 +75,8 @@ maps and dep-info hold absolute paths.
 `ci/oracle.py` checks Oak Oil's contract on a small workspace
 (`ci/fixture`) on every push: a cold build, a no-change build, a restore
 from the store and an edit are byte-identical to stock Cargo, stock Cargo
-recompiles nothing afterwards, and `clean` keeps everything Cargo uses.
+recompiles nothing afterwards, `clean` keeps everything Cargo uses, and
+builds stay byte-identical after `gc` empties the store.
 
 `lab/` holds the heavier checks used during development:
 
@@ -90,10 +92,16 @@ Nothing to undo. Oak Oil writes Cargo's own layout into the target dir and
 keeps its plan in `target/oakoil/`; plain `cargo build` works at any time.
 The store lives in `~/.oakoil` (or `$OAKOIL_HOME`) and can be deleted.
 
+`cargo oil gc` keeps the store bounded. Limits come from
+`OAKOIL_GC_MAX_AGE_DAYS` and `OAKOIL_GC_MAX_SIZE` (e.g. `20G`);
+`OAKOIL_GC=off` stops the daily automatic run. Removing an object never
+breaks a build: a unit that needed it compiles again, and missing Cargo
+state is recorded again through Cargo. Target dirs share blocks with the
+store through APFS clones, so the disk can gain less than `gc` reports.
+
 ## Limitations
 
 - macOS only: uses `nm` debug maps, APFS clones, xattrs and thread QoS.
-- No store garbage collection yet; `~/.oakoil` grows until deleted.
 - `cargo oil clean` runs your Cargo commands to find live units, which
   brings out-of-date profiles up to date first.
 - Early cutoff after a private-code edit is limited: rustc stores source

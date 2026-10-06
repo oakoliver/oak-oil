@@ -147,8 +147,22 @@ impl Store {
                 .open(out_dir.join(name))?
                 .set_modified(now)?;
         }
-        let _ = fs::write(obj.join(".last-use"), b"");
+        self.touch(&e.obj);
         Ok(())
+    }
+
+    /// Record that an object was just used, for `gc`. At most one write an
+    /// hour per object, so no-op builds stay read-only in practice.
+    pub fn touch(&self, obj: &str) {
+        let f = self.object_dir(obj).join(".last-use");
+        let recent = fs::metadata(&f)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| SystemTime::now().duration_since(t).ok())
+            .is_some_and(|age| age.as_secs() < 3600);
+        if !recent {
+            let _ = fs::write(f, b"");
+        }
     }
 
     /// Store the outputs of a finished compile under `mkey`.
@@ -265,6 +279,7 @@ impl Store {
             fs::copy(src.join("tree").join(rel), &dst)?;
             File::options().write(true).open(&dst)?.set_modified(now)?;
         }
+        self.touch(obj);
         fs::create_dir_all(dir)
     }
 }
@@ -285,6 +300,7 @@ impl Store {
             fs::copy(src.join("tree").join(rel), &dst)?;
             File::options().write(true).open(&dst)?.set_modified(now)?;
         }
+        self.touch(obj);
         Ok(())
     }
 }
