@@ -4,10 +4,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, BufRead, BufReader};
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 pub struct Options {
     pub commands: Vec<Vec<String>>,
@@ -44,20 +43,36 @@ pub fn default_commands(target: &Path) -> Vec<Vec<String>> {
 pub fn run(cwd: &Path, target: &Path, opts: &Options) -> io::Result<bool> {
     let before = dir_bytes(target);
     let (live, compiled) = live_units(cwd, target, &opts.commands)?;
-    if compiled > 0 {
-        eprintln!("oil: {compiled} units were out of date and are now built (they are live)");
-    }
+    let current = if compiled > 0 {
+        let now = dir_bytes(target);
+        eprintln!(
+            "oil: {compiled} units were out of date; Cargo built them first (+{}), they are live",
+            human(now.saturating_sub(before))
+        );
+        now
+    } else {
+        before
+    };
     let profiles: HashSet<PathBuf> = live.iter().map(|(p, _)| p.clone()).collect();
     let ids: HashSet<(PathBuf, String)> = live;
     let r = find_residue(target, &profiles, &ids)?;
 
+    if let Some(path) = std::env::var_os("OAKOIL_DUMP_RESIDUE") {
+        let all: Vec<String> = r
+            .stale_units
+            .iter()
+            .chain(&r.old_incremental)
+            .map(|p| p.display().to_string())
+            .collect();
+        let _ = fs::write(path, all.join("\n"));
+    }
     let sum = |v: &[PathBuf]| v.iter().map(|p| path_bytes(p)).sum::<u64>();
     let (a, b, c) = (
         sum(&r.stale_units),
         sum(&r.old_incremental),
         sum(&r.other_dirs),
     );
-    println!("target dir: {} ({})", target.display(), human(before));
+    println!("target dir: {} ({})", target.display(), human(current));
     println!(
         "  stale unit variants      {:>10}  ({} entries)",
         human(a),
@@ -101,12 +116,24 @@ pub fn run(cwd: &Path, target: &Path, opts: &Options) -> io::Result<bool> {
     }
     let after = dir_bytes(target);
     println!(
-        "freed {} ({} → {})",
-        human(before.saturating_sub(after)),
-        human(before),
-        human(after)
+        "removed {} ({} → {}){}",
+        human(current.saturating_sub(after)),
+        human(current),
+        human(after),
+        if current > before {
+            format!(
+                "; {} → {} counting what Cargo built first",
+                human(before),
+                human(after)
+            )
+        } else {
+            String::new()
+        }
     );
 
+    if std::env::var_os("OAKOIL_NO_VERIFY").is_some() {
+        return Ok(true);
+    }
     // Proof: the same commands now compile nothing.
     let (_, recompiled) = live_units(cwd, target, &opts.commands)?;
     if recompiled == 0 {
@@ -123,47 +150,87 @@ pub fn run(cwd: &Path, target: &Path, opts: &Options) -> io::Result<bool> {
     }
 }
 
-/// Runs each command with Cargo's fingerprint log. Returns the live
+/// Runs each command with Cargo's JSON messages. Returns the live
 /// (profile dir, unit id) pairs and how many units Cargo compiled.
 fn live_units(
     cwd: &Path,
     target: &Path,
     commands: &[Vec<String>],
 ) -> io::Result<(HashSet<(PathBuf, String)>, usize)> {
+    use crate::cargo_msgs::{fingerprint_dirs_by_target, profile_of_file, stat_key, unit_of_file};
     let mut live = HashSet::new();
     let mut compiled = 0;
+    let mut by_stat: HashMap<PathBuf, HashMap<(u64, i64, i64), String>> = HashMap::new();
     for c in commands {
-        let mut child = Command::new("cargo")
-            .args(c)
-            .current_dir(cwd)
-            .env("CARGO_TARGET_DIR", target)
-            .env("CARGO_LOG", "cargo::core::compiler::fingerprint=debug")
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        for line in BufReader::new(child.stderr.take().unwrap()).lines() {
-            let line = line?;
-            if let Some(i) = line.find("fingerprint at: ") {
-                let fp = PathBuf::from(line[i + 16..].trim());
-                if let Some(dir) = fp.parent()
-                    && let Some(profile) = dir.parent().and_then(Path::parent)
-                    && let Some((_, id)) = dir
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .and_then(|n| n.rsplit_once('-'))
-                {
-                    live.insert((profile.to_path_buf(), id.to_string()));
-                }
-            } else if line.trim_start().starts_with("Compiling ") {
-                compiled += 1;
-            }
-        }
-        if !child.wait()?.success() {
+        let report = crate::cargo_msgs::run(cwd, c, &[("CARGO_TARGET_DIR", target.as_os_str())])?;
+        if !report.ok {
             eprintln!(
                 "oil: `cargo {}` failed; its units are kept as they are",
                 c.join(" ")
             );
         }
+        for a in &report.artifacts {
+            compiled += usize::from(!a.fresh);
+            if let Some(unit) = a.filenames.iter().find_map(|f| unit_of_file(f)) {
+                live.insert(unit);
+                continue;
+            }
+            let Some(profile) = a.filenames.first().and_then(|f| profile_of_file(f)) else {
+                continue;
+            };
+            // an uplifted binary or example: its original in deps/ or examples/
+            // has the same size and mtime
+            let index = by_stat.entry(profile.clone()).or_insert_with(|| {
+                ["deps", "examples"]
+                    .iter()
+                    .flat_map(|d| fs::read_dir(profile.join(d)).into_iter().flatten())
+                    .filter_map(Result::ok)
+                    .filter_map(|e| {
+                        let id = unit_id(&e.file_name().to_string_lossy())?.to_string();
+                        Some((stat_key(&e.path())?, id))
+                    })
+                    .collect()
+            });
+            let mut found = false;
+            for f in &a.filenames {
+                if let Some(id) = stat_key(f).and_then(|k| index.get(&k)) {
+                    live.insert((profile.clone(), id.clone()));
+                    found = true;
+                }
+            }
+            // no id anywhere (cdylib crates): keep every fingerprint dir of
+            // the target, the safe side
+            if !found {
+                for d in fingerprint_dirs_by_target(&profile, &a.target_name) {
+                    if let Some(id) = d
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.rsplit_once('-'))
+                    {
+                        live.insert((profile.clone(), id.1.to_string()));
+                    }
+                }
+            }
+        }
+        for d in &report.run_dirs {
+            if let (Some(profile), Some(id)) = (
+                d.parent().and_then(Path::parent),
+                d.file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.rsplit_once('-'))
+                    .map(|x| x.1),
+            ) {
+                live.insert((profile.to_path_buf(), id.to_string()));
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("OAKOIL_DUMP_LIVE") {
+        let mut v: Vec<String> = live
+            .iter()
+            .map(|(p, id)| format!("{}\t{id}", p.display()))
+            .collect();
+        v.sort();
+        let _ = fs::write(path, v.join("\n"));
     }
     Ok((live, compiled))
 }

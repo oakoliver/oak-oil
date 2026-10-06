@@ -6,16 +6,16 @@
 //! those inputs changes; otherwise the executor runs it without Cargo.
 
 use crate::hashing::{HashCache, hash_bytes};
-use crate::unit::{Record, load_record, records_dir};
+use crate::unit::{Record, record_key_of, records_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, BufRead, BufReader};
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
-const PLAN_VERSION: u32 = 7;
+const PLAN_VERSION: u32 = 8;
 
 #[derive(Serialize, Deserialize)]
 pub struct Plan {
@@ -133,53 +133,6 @@ impl Plan {
     }
 }
 
-/// Runs Cargo with Oak Oil as `RUSTC_WRAPPER` and returns the fingerprint
-/// dirs of every unit Cargo considered (fresh or not).
-fn run_cargo(cwd: &Path, args: &[String], target: &Path) -> io::Result<(bool, Vec<PathBuf>)> {
-    let exe = std::env::current_exe()?;
-    let mut child = Command::new("cargo")
-        .args(args)
-        .current_dir(cwd)
-        .env("RUSTC_WRAPPER", &exe)
-        .env("OAKOIL_WRAPPER", "1")
-        .env("OAKOIL_TARGET", target)
-        .env("CARGO_LOG", "cargo::core::compiler::fingerprint=debug")
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut fps = Vec::new();
-    for line in BufReader::new(child.stderr.take().unwrap()).lines() {
-        let line = line?;
-        if let Some(i) = line.find("fingerprint at: ") {
-            fps.push(PathBuf::from(line[i + 16..].trim()));
-        } else if !line.contains(" cargo::core::compiler::fingerprint") {
-            eprintln!("{line}");
-        }
-    }
-    Ok((child.wait()?.success(), fps))
-}
-
-/// fingerprint file `…/<profile>/.fingerprint/<pkg>-<id>/<kind>-<name>` →
-/// `(fingerprint dir, unit id, alt key)` for compile units (not build-script
-/// runs). `alt key` is the record key a unit without extra-filename would
-/// have (`lib-ffi_shim` → `ffi_shim@<hash of <profile>/deps>`).
-fn compile_unit_of(fp: &Path) -> Option<(PathBuf, String, String)> {
-    let name = fp.file_name()?.to_string_lossy().to_string();
-    if name.starts_with("run-build-script") {
-        return None;
-    }
-    let dir = fp.parent()?;
-    let id = dir
-        .file_name()?
-        .to_string_lossy()
-        .rsplit_once('-')?
-        .1
-        .to_string();
-    let profile = dir.parent()?.parent()?;
-    let target_name = name.strip_prefix("lib-").unwrap_or(&name).replace('-', "_");
-    let alt = crate::unit::unit_key(&target_name, "", &profile.join("deps"));
-    Some((dir.to_path_buf(), id, alt))
-}
-
 pub struct Recorded {
     pub plan: Plan,
     pub forced_units: usize,
@@ -217,73 +170,121 @@ pub fn record(
     };
 
     let mut forced = 0;
-    let mut live_ids;
-    let mut fp_dirs: Vec<PathBuf>;
     let mut attempt = 0;
-    loop {
+    let exe = std::env::current_exe()?;
+    let (live_keys, mut fp_dirs, run_dirs) = loop {
         let t_cargo = std::time::Instant::now();
-        let (ok, fps) = run_cargo(cwd, args, target)?;
+        let report = crate::cargo_msgs::run(
+            cwd,
+            args,
+            &[
+                ("RUSTC_WRAPPER", exe.as_os_str()),
+                ("OAKOIL_WRAPPER", "1".as_ref()),
+                ("OAKOIL_TARGET", target.as_os_str()),
+            ],
+        )?;
         if std::env::var_os("OAKOIL_TRACE").is_some() {
             eprintln!(
-                "oil-trace: cargo run {:.3}s ({} fingerprint lines)",
+                "oil-trace: cargo run {:.3}s ({} units)",
                 t_cargo.elapsed().as_secs_f64(),
-                fps.len()
+                report.artifacts.len()
             );
         }
-        if !ok {
+        if !report.ok {
             return Ok(None);
         }
-        fp_dirs = fps
-            .iter()
-            .filter_map(|f| f.parent().map(Path::to_path_buf))
-            .collect();
-        let units: Vec<(PathBuf, String, String)> =
-            fps.iter().filter_map(|f| compile_unit_of(f)).collect();
-        let by_id = records_by_id(target);
-        let known = |id: &String, alt: &String| by_id.contains_key(id) || by_id.contains_key(alt);
-        let missing: Vec<&PathBuf> = units
-            .iter()
-            .filter(|(_, id, alt)| !known(id, alt))
-            .map(|(d, _, _)| d)
-            .collect();
-        live_ids = units
-            .iter()
-            .map(|(_, id, alt)| {
-                if by_id.contains_key(id) {
-                    id.clone()
-                } else {
-                    alt.clone()
+        let by_key = records_by_key(target);
+        // uplifted copies and build-script copies carry no unit id: map them
+        // back to their record by size and mtime
+        let idx = crate::cargo_msgs::stat_index(by_key.values().flat_map(|r| {
+            r.outputs
+                .iter()
+                .map(move |o| (r.key.as_str(), r.out_dir.join(o)))
+        }));
+        let mut live = HashSet::new();
+        let mut fps = Vec::new();
+        let mut missing = 0;
+        let mut to_force = Vec::new();
+        for a in &report.artifacts {
+            let key = a.filenames.iter().find_map(|f| {
+                let k = record_key_of(f);
+                if by_key.contains_key(&k) {
+                    return Some(k);
                 }
-            })
-            .collect::<HashSet<_>>();
-        if missing.is_empty() || attempt == 1 {
-            if !missing.is_empty() {
-                eprintln!(
-                    "oil: {} units could not be recorded; plan not saved",
-                    missing.len()
-                );
-                return Ok(None);
+                crate::cargo_msgs::stat_key(f).and_then(|s| idx.get(&s).cloned())
+            });
+            // the unit's id: from its record's own outputs in deps/ or build/
+            // (uplifted binaries and cdylib crates carry none in Cargo's list)
+            let unit = key
+                .as_ref()
+                .and_then(|k| by_key.get(k))
+                .and_then(|r| {
+                    r.outputs
+                        .iter()
+                        .find_map(|o| crate::cargo_msgs::unit_of_file(&r.out_dir.join(o)))
+                })
+                .or_else(|| {
+                    a.filenames
+                        .iter()
+                        .find_map(|f| crate::cargo_msgs::unit_of_file(f))
+                });
+            let fp: Vec<PathBuf> = match unit {
+                Some((profile, id)) => crate::cargo_msgs::fingerprint_dir_by_id(&profile, &id)
+                    .into_iter()
+                    .collect(),
+                None => a
+                    .filenames
+                    .first()
+                    .and_then(|f| crate::cargo_msgs::profile_of_file(f))
+                    .map(|p| crate::cargo_msgs::fingerprint_dirs_by_target(&p, &a.target_name))
+                    .unwrap_or_default(),
+            };
+            match key {
+                Some(k) => {
+                    live.insert(k);
+                    fps.extend(fp.into_iter().take(1));
+                }
+                None => {
+                    missing += 1;
+                    to_force.extend(fp);
+                }
             }
-            break;
         }
-        forced = missing.len();
-        for d in missing {
+        // build-script runs: `<profile>/build/<pkg>-<id>` ↔ `<profile>/.fingerprint/<pkg>-<id>`
+        for d in &report.run_dirs {
+            if let (Some(profile), Some(name)) = (d.parent().and_then(Path::parent), d.file_name())
+            {
+                let f = profile.join(".fingerprint").join(name);
+                if f.is_dir() {
+                    fps.push(f);
+                }
+            }
+        }
+        if missing == 0 {
+            break (live, fps, report.run_dirs);
+        }
+        if attempt == 1 || to_force.is_empty() {
+            eprintln!("oil: {missing} units could not be recorded; plan not saved");
+            return Ok(None);
+        }
+        forced = missing;
+        for d in &to_force {
             let _ = fs::remove_dir_all(d);
         }
         attempt += 1;
-    }
+    };
 
     let trace = std::env::var_os("OAKOIL_TRACE").is_some();
     let t_plan = std::time::Instant::now();
-    let by_id = records_by_id(target);
-    let mut units: Vec<String> = live_ids
-        .iter()
-        .filter_map(|id| by_id.get(id).map(|r| r.key.clone()))
+    let by_key = records_by_key(target);
+    let mut units: Vec<String> = live_keys
+        .into_iter()
+        .filter(|k| by_key.contains_key(k))
         .collect();
     units.sort();
     let recs: Vec<Record> = units
         .iter()
-        .filter_map(|k| load_record(target, k))
+        .filter_map(|k| by_key.get(k).cloned())
         .collect();
 
     let uplifts = find_uplifts(&recs);
@@ -305,32 +306,18 @@ pub fn record(
     cargo_dep_infos.dedup();
     fp_dirs.sort();
     fp_dirs.dedup();
-    let mut fingerprints = Vec::new();
-    let mut build_runs = Vec::new();
-    for d in &fp_dirs {
-        if d.is_dir() {
-            fingerprints.push((d.clone(), String::new()));
-        }
-        // a run unit's fingerprint dir `<profile>/.fingerprint/<pkg>-<id>` pairs
-        // with its run dir `<profile>/build/<pkg>-<id>` (out/, output, …)
-        let is_run = fs::read_dir(d)
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .any(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("run-build-script")
-            });
-        if is_run
-            && let (Some(name), Some(profile)) = (d.file_name(), d.parent().and_then(Path::parent))
-        {
-            let run_dir = profile.join("build").join(name);
-            if run_dir.is_dir() {
-                build_runs.push((run_dir, String::new()));
-            }
-        }
-    }
+    let fingerprints: Vec<(PathBuf, String)> = fp_dirs
+        .into_iter()
+        .filter(|d| d.is_dir())
+        .map(|d| (d, String::new()))
+        .collect();
+    let mut build_runs: Vec<(PathBuf, String)> = run_dirs
+        .into_iter()
+        .filter(|d| d.is_dir())
+        .map(|d| (d, String::new()))
+        .collect();
+    build_runs.sort();
+    build_runs.dedup();
     if trace {
         eprintln!(
             "oil-trace: snapshots {:.3}s",
@@ -371,23 +358,16 @@ pub fn record(
     }))
 }
 
-/// Unit id (extra-filename without the dash) → record; units without an
-/// extra-filename are indexed by their record key.
-fn records_by_id(target: &Path) -> HashMap<String, Record> {
+/// Record key → record, for every unit the wrapper has seen in this target.
+fn records_by_key(target: &Path) -> HashMap<String, Record> {
     let mut m = HashMap::new();
     if let Ok(rd) = fs::read_dir(records_dir(target)) {
         for e in rd.filter_map(Result::ok) {
             if let Some(r) = fs::read(e.path())
                 .ok()
                 .and_then(|b| serde_json::from_slice::<Record>(&b).ok())
-                && let Some(inv) = r.invocation()
             {
-                let id = if inv.extra.is_empty() {
-                    r.key.clone()
-                } else {
-                    inv.extra.trim_start_matches('-').to_string()
-                };
-                m.insert(id, r);
+                m.insert(r.key.clone(), r);
             }
         }
     }

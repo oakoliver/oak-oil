@@ -1,0 +1,6 @@
+# A tiny workspace with each kind of unit Oak Oil must handle: a library
+# with an example, a build script whose OUT_DIR output is include!d, a
+# cdylib+rlib crate (no hash in its file names), and a binary using them.
+[workspace]
+members = ["core", "gen", "shim", "app"]
+resolver = "2"

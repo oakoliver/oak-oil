@@ -67,7 +67,12 @@ maps and dep-info hold absolute paths.
 
 ## Verifying it
 
-`lab/` holds the checks used during development:
+`ci/oracle.py` checks Oak Oil's contract on a small workspace
+(`ci/fixture`) on every push: a cold build, a no-change build, a restore
+from the store and an edit are byte-identical to stock Cargo, stock Cargo
+recompiles nothing afterwards, and `clean` keeps everything Cargo uses.
+
+`lab/` holds the heavier checks used during development:
 
 - `phase1.py` builds a project with stock Cargo and with Oak Oil at the same
   path and compares every output by sha256, then checks stock Cargo
@@ -84,9 +89,6 @@ The store lives in `~/.oakoil` (or `$OAKOIL_HOME`) and can be deleted.
 ## Limitations
 
 - macOS only: uses `nm` debug maps, APFS clones, xattrs and thread QoS.
-- Reads Cargo's fingerprint debug log to find live units. That format is
-  not a stable interface; a Cargo update may break `build` recording and
-  `clean`.
 - No store garbage collection yet; `~/.oakoil` grows until deleted.
 - `cargo oil clean` runs your Cargo commands to find live units, which
   brings out-of-date profiles up to date first.
@@ -96,9 +98,27 @@ The store lives in `~/.oakoil` (or `$OAKOIL_HOME`) and can be deleted.
 ## Install
 
 ```sh
-cargo install --path .
+cargo install cargo-oil        # from crates.io
 cargo oil build
 ```
+
+Prebuilt binaries (Apple Silicon and Intel) are on the
+[releases page](https://github.com/oakoliver/oak-oil/releases).
+
+## Where releases come from
+
+Every release is built and published by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) from a
+`v*` tag, after the same checks as CI (lint, tests, and the oracle below):
+
+- **Binaries** on the GitHub release carry a signed build provenance
+  attestation linking them to the workflow run and commit:
+  `gh attestation verify cargo-oil-<version>-<target>.tar.gz --repo oakoliver/oak-oil`.
+  `SHA256SUMS` lists their checksums.
+- **The crate** is published to crates.io by the same workflow through
+  trusted publishing (OIDC); no long-lived token exists. The published
+  crate records the git commit it was built from.
+- Workflow actions are pinned to full commit SHAs.
 
 ## License
 

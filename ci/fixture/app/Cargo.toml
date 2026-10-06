@@ -1,0 +1,10 @@
+[package]
+name = "fx-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+fx-core = { path = "../core" }
+fx-gen = { path = "../gen" }
+fx-shim = { path = "../shim" }

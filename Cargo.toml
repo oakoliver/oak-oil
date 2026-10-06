@@ -1,5 +1,5 @@
 [package]
-name = "oak-oil"
+name = "cargo-oil"
 version = "0.1.0"
 edition = "2024"
 description = "Oak Oil: the WD-40 for Rust builds. A Cargo-compatible build executor and content store, with verified cleanup of build residue."
@@ -7,6 +7,10 @@ readme = "README.md"
 keywords = ["cargo", "build", "cache", "disk", "executor"]
 categories = ["development-tools::cargo-plugins", "development-tools::build-utils"]
 license = "MIT OR Apache-2.0"
+rust-version = "1.88"
+repository = "https://github.com/oakoliver/oak-oil"
+homepage = "https://github.com/oakoliver/oak-oil"
+include = ["src/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
 
 [[bin]]
 name = "cargo-oil"

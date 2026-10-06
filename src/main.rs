@@ -1,5 +1,12 @@
 //! `cargo oil` — Oak Oil, the WD-40 for Rust builds.
 
+#[cfg(not(target_os = "macos"))]
+compile_error!(
+    "Oak Oil currently supports macOS only: it relies on APFS clones, Mach-O debug maps and xattrs. \
+     See https://github.com/oakoliver/oak-oil#limitations"
+);
+
+mod cargo_msgs;
 mod clean;
 mod depinfo;
 mod drain;

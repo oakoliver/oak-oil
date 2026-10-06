@@ -1,0 +1,38 @@
+# Every push and pull request: lint, test, and Oak Oil's contract on a small
+# workspace (ci/oracle.py): output byte-identical to stock Cargo, and stock
+# Cargo finds nothing to rebuild afterwards.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.95.0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup default "$RUST_VERSION"
+          rustc -vV
+
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --release -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+
+      - name: Oracle (byte-identical to stock Cargo)
+        run: python3 ci/oracle.py target/release/cargo-oil
