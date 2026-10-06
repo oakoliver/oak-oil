@@ -11,7 +11,7 @@ byte-identical to what stock Cargo would produce.
 
 > **Status: experimental.** macOS (Apple Silicon tested) and Linux (new:
 > btrfs, ext4 and XFS checked), Rust 1.95. Verified on four real workspaces
-> on macOS; not yet on yours. Stock Cargo keeps
+> on macOS and two on Linux; not yet on yours. Stock Cargo keeps
 > working on the same target dir at any time.
 
 ## What it does
@@ -127,9 +127,9 @@ the store (APFS, btrfs, XFS), the disk can gain less than `gc` reports.
 
 - macOS and Linux only. On Linux, `split-debuginfo` other than Cargo's
   default (`off`) falls back to a slower scan for a unit's object files.
-- Linux is new: CI checks it on ext4, and btrfs and XFS were checked by
-  hand, but no real workspace has had the full byte-identity check there
-  yet.
+- Linux is new: CI checks it on ext4, btrfs and XFS were checked by hand,
+  and two real workspaces (103 and 111 units) passed the full
+  byte-identity check on btrfs. Wider use will find what those did not.
 - `cargo oil clean` runs your Cargo commands to find live units, which
   brings out-of-date profiles up to date first.
 - Early cutoff after a private-code edit is limited: rustc stores source
