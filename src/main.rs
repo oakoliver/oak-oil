@@ -1,4 +1,4 @@
-//! `cargo oil` — Oak Oil, the WD-40 for Rust builds.
+//! `cargo oil` — Oak Oil: lean, fast Rust builds.
 
 #[cfg(not(target_os = "macos"))]
 compile_error!(

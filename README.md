@@ -4,7 +4,7 @@
 
 # Oak Oil
 
-The WD-40 for Rust builds. Oak Oil removes build "rust" (stale and duplicate
+Lean, fast Rust builds. Oak Oil removes build "rust" (stale and duplicate
 artifacts) and keeps Rust builds moving: Cargo plans the build, Oak Oil
 executes it against a content-addressed store, and the output is
 byte-identical to what stock Cargo would produce.
@@ -122,8 +122,9 @@ Every release is built and published by
   `gh attestation verify cargo-oil-<version>-<target>.tar.gz --repo oakoliver/oak-oil`.
   `SHA256SUMS` lists their checksums.
 - **The crate** is published to crates.io by the same workflow through
-  trusted publishing (OIDC); no long-lived token exists. The published
-  crate records the git commit it was built from.
+  trusted publishing (OIDC); no long-lived token exists. (0.1.0, the first
+  release, had to use a one-time token, since revoked.) The published crate
+  records the git commit it was built from.
 - Workflow actions are pinned to full commit SHAs.
 
 ## License
