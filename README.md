@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/oakoliver/oak-oil/main/docs/banner.png" alt="Oak Oil: lean, fast Rust builds" width="100%">
+</p>
+
 # Oak Oil
 
 The WD-40 for Rust builds. Oak Oil removes build "rust" (stale and duplicate
@@ -98,12 +102,14 @@ The store lives in `~/.oakoil` (or `$OAKOIL_HOME`) and can be deleted.
 ## Install
 
 ```sh
-cargo install cargo-oil        # from crates.io
+cargo install cargo-oil        # build from the crates.io source
+cargo binstall cargo-oil       # or: download the prebuilt binary of the release
 cargo oil build
 ```
 
 Prebuilt binaries (Apple Silicon and Intel) are on the
-[releases page](https://github.com/oakoliver/oak-oil/releases).
+[releases page](https://github.com/oakoliver/oak-oil/releases); `cargo binstall`
+fetches them from there.
 
 ## Where releases come from
 

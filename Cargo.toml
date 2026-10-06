@@ -12,6 +12,13 @@ repository = "https://github.com/oakoliver/oak-oil"
 homepage = "https://github.com/oakoliver/oak-oil"
 include = ["src/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
 
+# `cargo binstall cargo-oil` downloads the binary built and attested by the
+# release workflow (see README, "Where releases come from").
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.tar.gz"
+bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
 [[bin]]
 name = "cargo-oil"
 path = "src/main.rs"
