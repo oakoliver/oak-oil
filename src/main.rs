@@ -190,12 +190,15 @@ fn try_build(rest: &[String]) -> std::io::Result<ExitCode> {
     let hc_file = oil_dir.join("hashcache.json");
     let hc = HashCache::load(&hc_file);
     hc.allow_xattr(&target);
-    let recorded = plan::record(&cwd, &cargo_args, &target, &hc, &store::Store::open()?)?;
+    let recorded = plan::record(&cwd, &cargo_args, &target, &hc)?;
     let _ = std::fs::create_dir_all(&oil_dir).and_then(|_| hc.save(&hc_file));
     let Some(rec) = recorded else {
         return Ok(ExitCode::FAILURE);
     };
     rec.plan.save(&plan_file)?;
+    // Store writes queued by the wrapper and the plan's snapshots of Cargo
+    // state: in the background (OAKOIL_SYNC_STORE=1: now).
+    drain::after_record(&target, &plan_file)?;
     let log = std::fs::read_to_string(oil_dir.join("wrapper.log")).unwrap_or_default();
     let count = |o: &str| {
         log.lines()

@@ -27,7 +27,7 @@ crates depend on.
 
 | Scenario | Stock | Oak Oil | |
 | --- | --- | --- | --- |
-| Clean build | 10.71 s | 12.45 s | 0.86× |
+| Clean build | 10.69 s | 10.60 s | 1.0× |
 | No-change build | 0.15 s | 0.14 s | 1.1× |
 | Comment edit | 2.56 s | 1.97 s | 1.3× |
 | Private code edit | 3.02 s | 2.79 s | 1.1× |
@@ -35,11 +35,11 @@ crates depend on.
 | `rm -rf target`, build | 10.90 s | 1.66 s | 6.6× |
 | Second checkout of the same project | 10.96 s | 9.52 s | 1.15× |
 
-On a smaller workspace (5 crates, 104 packages), edits are at parity and
-reuse scenarios are 9–18× faster. A clean build is ~10% slower: the first
-build records the plan through Cargo. Store writes run afterwards in a
-background process on the efficiency cores (about 35 s of CPU across 42
-builds of Project C); they never hold up a build.
+On a smaller workspace (5 crates, 104 packages), edits are at parity, a
+clean build is 1.04× and reuse scenarios are 9–18× faster. Filling the store
+is not free: it runs after the build in a background process on the
+efficiency cores (about 5.5 s after a clean build of Project C); no build
+waits for it.
 
 Cleanup on a real 46 GiB target dir freed 10.1 GiB, after which Cargo
 recompiled nothing. More detail: [docs/findings.md](docs/findings.md).

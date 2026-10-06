@@ -44,7 +44,12 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         outputs: vec![],
     };
     let t0 = Instant::now();
-    match run_unit(&ctx, &rec, &|| {}, Echo::Raw, None) {
+    // Store writes go to a spool file, done after the build by the drain:
+    // Cargo sees the unit finished as soon as rustc does.
+    ctx.defer_puts();
+    let result = run_unit(&ctx, &rec, &|| {}, Echo::Raw, None);
+    let _ = crate::drain::spool(&ctx, &rec.key);
+    match result {
         Ok((Outcome::Failed(code), _)) => ExitCode::from(code.clamp(1, 255) as u8),
         Ok((outcome, outputs)) => {
             rec.outputs = outputs;

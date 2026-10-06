@@ -50,7 +50,7 @@ Median of 3, tools alternating within each repetition.
 
 | Scenario | A stock | A Oak Oil | | C stock | C Oak Oil | |
 | --- | --- | --- | --- | --- | --- | --- |
-| Clean build | 9.46 s | 10.25 s | 0.92× | 10.71 s | 12.45 s | 0.86× |
+| Clean build | 10.30 s | 9.89 s | 1.04× | 10.69 s | 10.60 s | 1.01× |
 | No-change build | 0.06 s | 0.07 s | 0.8× | 0.15 s | 0.14 s | 1.1× |
 | Comment edit | 0.72 s | 0.68 s | 1.05× | 2.56 s | 1.97 s | 1.3× |
 | Private code edit | 0.78 s | 0.76 s | 1.02× | 3.02 s | 2.79 s | 1.08× |
@@ -58,7 +58,10 @@ Median of 3, tools alternating within each repetition.
 | `rm -rf target`, build | 9.26 s | 0.57 s | 16× | 10.90 s | 1.66 s | 6.6× |
 | Second checkout | 9.72 s | 10.22 s | 0.95× | 10.96 s | 9.52 s | 1.15× |
 
-Incremental compilation on. With it off, C's revert is 40× and its
+Incremental compilation on. Clean-build rows were re-measured after store
+writes moved out of the build (they were 0.92× and 0.86× before); the
+store is then filled in the background, about 5.5 s of efficiency-core
+time after a clean build of C. With incremental compilation off, C's revert is 40× and its
 `rm -rf target` 8.3× faster; edits are at parity or better. Background store
 writes after C's builds took 35 s of efficiency-core CPU across 42 builds
 (at most 4.2 s after one build).
@@ -92,7 +95,8 @@ writes after C's builds took 35 s of efficiency-core CPU across 42 builds
 9. **An executor's cost is everything except rustc.** The edit loop went
    from 0.63× to 1.1–1.3× stock through a jobserver, critical-path order,
    stat-only freshness, outputs from rustc's notices, and store writes moved
-   out of the build.
+   out of the build. Clean builds reached parity (from 0.86×) the same way:
+   nothing but rustc may sit on the path Cargo waits for.
 10. **Measure on a quiet machine, or interleave.** Several early results
     were load noise; alternating tools within each repetition and keeping
     every repetition kept the conclusions honest.
@@ -105,7 +109,7 @@ writes after C's builds took 35 s of efficiency-core CPU across 42 builds
 | --- | --- | --- |
 | Path-independent outputs (`--remap-path-prefix`) and cached build-script runs | Share workspace crates and linked outputs across checkouts and worktrees. | Medium |
 | Store garbage collection | The store grows without bound. | Low |
-| Plan from Cargo's JSON messages | Drop the dependency on Cargo's debug log; trim the ~10% clean-build cost. | Low–medium |
+| Plan from Cargo's JSON messages | Drop the dependency on Cargo's debug log, an unstable interface. | Low–medium |
 | rustc interface hash, relink-only | Skip dependents after private edits; turn binary rebuilds into a link. | High, upstream |
 | `clean` without building | Find live units without bringing stale profiles up to date. | Medium |
 | Linux support | Debug maps and `split-debuginfo=unpacked` are macOS specifics. | Medium |

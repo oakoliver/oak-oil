@@ -90,6 +90,14 @@ pub fn run(plan: &Plan, ctx: &Ctx, jobs: usize) -> Result<Stats, ExecError> {
     }
     // Build-script results the units read (OUT_DIR) come back first; their
     // timestamps are set again once their build script is in place.
+    let needs_restore = plan
+        .build_runs
+        .iter()
+        .chain(&plan.fingerprints)
+        .any(|(d, _)| !d.is_dir());
+    if needs_restore && !plan.snapshots_stored() {
+        return Err(ExecError::Replan("Cargo state not in the store yet".into()));
+    }
     let mut restored_runs: Vec<PathBuf> = Vec::new();
     for (dir, obj) in &plan.build_runs {
         if !dir.is_dir() {
@@ -326,10 +334,12 @@ pub fn run(plan: &Plan, ctx: &Ctx, jobs: usize) -> Result<Stats, ExecError> {
             fs::write(tag, CACHEDIR_TAG).map_err(ExecError::Io)?;
         }
     }
-    for (dir, obj) in &plan.cargo_dep_infos {
-        ctx.store
-            .restore_tree_missing(obj, dir)
-            .map_err(ExecError::Io)?;
+    for (file, obj) in &plan.cargo_dep_infos {
+        if !file.exists() && !obj.is_empty() {
+            ctx.store
+                .restore_tree_missing(obj, file.parent().unwrap())
+                .map_err(ExecError::Io)?;
+        }
     }
     for (dir, obj) in &plan.fingerprints {
         if !dir.is_dir() {

@@ -18,6 +18,10 @@ use std::time::SystemTime;
 
 pub const TARGET_TOKEN: &str = "{T}";
 
+fn shard(id: &str) -> &str {
+    id.get(..2).unwrap_or("__")
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Entry {
     pub obj: String,
@@ -60,11 +64,13 @@ impl Store {
     }
 
     fn manifest_dir(&self, mkey: &str) -> PathBuf {
-        self.root.join("manifests").join(&mkey[..2]).join(mkey)
+        self.root.join("manifests").join(shard(mkey)).join(mkey)
     }
 
+    /// An empty or malformed id maps to a path that does not exist, so a
+    /// lookup misses and a restore fails with an error, never a panic.
     fn object_dir(&self, obj: &str) -> PathBuf {
-        self.root.join("objects").join(&obj[..2]).join(obj)
+        self.root.join("objects").join(shard(obj)).join(obj)
     }
 
     /// The newest entry for `mkey` whose recorded inputs still hash the same.

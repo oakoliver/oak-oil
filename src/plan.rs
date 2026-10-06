@@ -15,7 +15,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const PLAN_VERSION: u32 = 6;
+const PLAN_VERSION: u32 = 7;
 
 #[derive(Serialize, Deserialize)]
 pub struct Plan {
@@ -35,8 +35,8 @@ pub struct Plan {
     /// Cargo fingerprint dirs: restored after all outputs, so a later stock
     /// `cargo build` sees everything fresh.
     pub fingerprints: Vec<(PathBuf, String)>,
-    /// Cargo-written dep-info next to uplifted outputs (`debug/foo.d`),
-    /// stored as one-file trees keyed by their dir.
+    /// Cargo-written dep-info next to uplifted outputs (`debug/foo.d`):
+    /// (file, one-file tree object).
     pub cargo_dep_infos: Vec<(PathBuf, String)>,
     /// `CACHEDIR.TAG` files Cargo wrote below the target dir (e.g. in
     /// `x86_64-apple-darwin/`).
@@ -83,6 +83,46 @@ impl Plan {
             return Some("unit records missing".into());
         }
         None
+    }
+
+    /// True when every snapshot is in the store (the drain has run).
+    pub fn snapshots_stored(&self) -> bool {
+        self.build_runs
+            .iter()
+            .chain(&self.fingerprints)
+            .chain(&self.cargo_dep_infos)
+            .all(|(_, o)| !o.is_empty())
+    }
+
+    /// Store the snapshots not stored yet (run by the background drain).
+    pub fn fill_snapshots(
+        &mut self,
+        store: &crate::store::Store,
+        hc: &HashCache,
+    ) -> io::Result<()> {
+        for (dir, obj) in self
+            .build_runs
+            .iter_mut()
+            .chain(self.fingerprints.iter_mut())
+        {
+            if obj.is_empty() && dir.is_dir() {
+                *obj = store.put_tree(dir, hc)?;
+            }
+        }
+        for (file, obj) in self.cargo_dep_infos.iter_mut() {
+            if obj.is_empty() && file.is_file() {
+                let tmp = store
+                    .root()
+                    .join("tmp")
+                    .join(format!("dinfo.{}", std::process::id()));
+                let _ = fs::remove_dir_all(&tmp);
+                fs::create_dir_all(&tmp)?;
+                fs::copy(&*file, tmp.join(file.file_name().unwrap()))?;
+                *obj = store.put_tree(&tmp, hc)?;
+                let _ = fs::remove_dir_all(&tmp);
+            }
+        }
+        Ok(())
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
@@ -153,7 +193,6 @@ pub fn record(
     args: &[String],
     target: &Path,
     hc: &HashCache,
-    store: &crate::store::Store,
 ) -> io::Result<Option<Recorded>> {
     let watch_env: Vec<(String, Option<String>)> = {
         let mut v: Vec<_> = std::env::vars()
@@ -247,28 +286,21 @@ pub fn record(
         .filter_map(|k| load_record(target, k))
         .collect();
 
-    let uplifts = find_uplifts(&recs, hc);
+    let uplifts = find_uplifts(&recs);
     if trace {
         eprintln!(
             "oil-trace: records+uplifts {:.3}s",
             t_plan.elapsed().as_secs_f64()
         );
     }
-    let mut cargo_dep_infos = Vec::new();
-    for (_, dst) in &uplifts {
-        let d = dst.with_extension("d");
-        if d.is_file() && d != *dst {
-            let tmp = store
-                .root()
-                .join("tmp")
-                .join(format!("dinfo.{}", std::process::id()));
-            let _ = fs::remove_dir_all(&tmp);
-            fs::create_dir_all(&tmp)?;
-            fs::copy(&d, tmp.join(d.file_name().unwrap()))?;
-            cargo_dep_infos.push((d.parent().unwrap().to_path_buf(), store.put_tree(&tmp, hc)?));
-            let _ = fs::remove_dir_all(&tmp);
-        }
-    }
+    // Snapshots of Cargo's own state, stored later by the background drain
+    // (`fill_snapshots`); an empty object id means "not stored yet".
+    let mut cargo_dep_infos: Vec<(PathBuf, String)> = uplifts
+        .iter()
+        .map(|(_, dst)| dst.with_extension("d"))
+        .filter(|d| d.is_file())
+        .map(|d| (d, String::new()))
+        .collect();
     cargo_dep_infos.sort();
     cargo_dep_infos.dedup();
     fp_dirs.sort();
@@ -277,7 +309,7 @@ pub fn record(
     let mut build_runs = Vec::new();
     for d in &fp_dirs {
         if d.is_dir() {
-            fingerprints.push((d.clone(), store.put_tree(d, hc)?));
+            fingerprints.push((d.clone(), String::new()));
         }
         // a run unit's fingerprint dir `<profile>/.fingerprint/<pkg>-<id>` pairs
         // with its run dir `<profile>/build/<pkg>-<id>` (out/, output, …)
@@ -295,7 +327,7 @@ pub fn record(
         {
             let run_dir = profile.join("build").join(name);
             if run_dir.is_dir() {
-                build_runs.push((run_dir.clone(), store.put_tree(&run_dir, hc)?));
+                build_runs.push((run_dir, String::new()));
             }
         }
     }
@@ -364,10 +396,13 @@ fn records_by_id(target: &Path) -> HashMap<String, Record> {
 
 /// Cargo copies final outputs from `deps/` up into the profile dir; find
 /// those copies by size and content.
-fn find_uplifts(recs: &[Record], hc: &HashCache) -> Vec<(PathBuf, PathBuf)> {
+fn find_uplifts(recs: &[Record]) -> Vec<(PathBuf, PathBuf)> {
+    // Cargo's uplifted copy keeps the size and the nanosecond mtime of the
+    // file in deps/ (a clone or hard link), so no file needs reading.
+    let key = |m: &fs::Metadata| (m.len(), m.mtime(), m.mtime_nsec());
     let mut out = Vec::new();
     let mut seen_dirs = HashSet::new();
-    let mut candidates: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    let mut candidates: HashMap<(u64, i64, i64), Vec<PathBuf>> = HashMap::new();
     for r in recs {
         for dir in [r.out_dir.parent(), Some(r.out_dir.as_path())]
             .into_iter()
@@ -379,11 +414,11 @@ fn find_uplifts(recs: &[Record], hc: &HashCache) -> Vec<(PathBuf, PathBuf)> {
             let Ok(rd) = fs::read_dir(dir) else { continue };
             for e in rd.filter_map(Result::ok) {
                 let p = e.path();
-                if p.is_file()
-                    && p.extension().is_none_or(|x| x != "d")
+                if p.extension().is_none_or(|x| x != "d")
                     && let Ok(m) = e.metadata()
+                    && m.is_file()
                 {
-                    candidates.entry(m.len()).or_default().push(p);
+                    candidates.entry(key(&m)).or_default().push(p);
                 }
             }
         }
@@ -396,9 +431,8 @@ fn find_uplifts(recs: &[Record], hc: &HashCache) -> Vec<(PathBuf, PathBuf)> {
         {
             let src = r.out_dir.join(o);
             let Ok(m) = fs::metadata(&src) else { continue };
-            let Ok(h) = hc.get(&src) else { continue };
-            for c in candidates.get(&m.len()).into_iter().flatten() {
-                if c != &src && hc.get(c).is_ok_and(|ch| ch == h) {
+            for c in candidates.get(&key(&m)).into_iter().flatten() {
+                if c != &src {
                     out.push((src.clone(), c.clone()));
                 }
             }

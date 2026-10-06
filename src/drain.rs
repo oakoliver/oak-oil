@@ -17,6 +17,55 @@ use std::time::{Duration, Instant};
 struct Batch {
     target: PathBuf,
     jobs: Vec<PutJob>,
+    /// A plan whose snapshots of Cargo state still need storing.
+    #[serde(default)]
+    plan: Option<PathBuf>,
+}
+
+fn spool_dir(target: &Path) -> PathBuf {
+    target.join("oakoil").join("pending")
+}
+
+/// Wrapper mode: write this unit's queued store writes to the target's spool.
+pub fn spool(ctx: &Ctx, key: &str) -> io::Result<()> {
+    let jobs = ctx.take_puts();
+    if jobs.is_empty() {
+        return Ok(());
+    }
+    let dir = spool_dir(&ctx.target);
+    fs::create_dir_all(&dir)?;
+    let tmp = dir.join(format!(".{key}.{}.tmp", std::process::id()));
+    fs::write(&tmp, serde_json::to_vec(&jobs)?)?;
+    fs::rename(tmp, dir.join(format!("{key}.{}.json", std::process::id())))
+}
+
+/// After recording: store the spooled writes and the plan's snapshots,
+/// in the background unless OAKOIL_SYNC_STORE is set.
+pub fn after_record(target: &Path, plan: &Path) -> io::Result<()> {
+    let mut jobs = Vec::new();
+    if let Ok(rd) = fs::read_dir(spool_dir(target)) {
+        for e in rd.filter_map(Result::ok) {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "json")
+                && let Ok(v) = fs::read(&p)
+                    .map_err(drop)
+                    .and_then(|b| serde_json::from_slice::<Vec<PutJob>>(&b).map_err(drop))
+            {
+                jobs.extend(v);
+                let _ = fs::remove_file(&p);
+            }
+        }
+    }
+    let batch = Batch {
+        target: target.to_path_buf(),
+        jobs,
+        plan: Some(plan.to_path_buf()),
+    };
+    if std::env::var_os("OAKOIL_SYNC_STORE").is_some() {
+        return process(batch);
+    }
+    let store = crate::store::Store::open()?;
+    launch(store.root(), &batch)
 }
 
 fn drains_dir(store_root: &Path) -> PathBuf {
@@ -28,20 +77,21 @@ pub fn spawn(ctx: &Ctx) -> io::Result<()> {
     if jobs.is_empty() {
         return Ok(());
     }
-    let dir = drains_dir(ctx.store.root());
-    fs::create_dir_all(&dir)?;
-    let file = dir.join(format!(
-        "batch-{}-{}.json",
-        std::process::id(),
-        Instant::now().elapsed().as_nanos()
-    ));
-    fs::write(
-        &file,
-        serde_json::to_vec(&Batch {
+    launch(
+        ctx.store.root(),
+        &Batch {
             target: ctx.target.clone(),
             jobs,
-        })?,
-    )?;
+            plan: None,
+        },
+    )
+}
+
+fn launch(store_root: &Path, batch: &Batch) -> io::Result<()> {
+    let dir = drains_dir(store_root);
+    fs::create_dir_all(&dir)?;
+    let file = dir.join(format!("batch-{}.json", std::process::id()));
+    fs::write(&file, serde_json::to_vec(batch)?)?;
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("store-drain")
         .arg(&file)
@@ -64,13 +114,25 @@ pub fn spawn(ctx: &Ctx) -> io::Result<()> {
 pub fn run(batch_file: &Path) -> io::Result<()> {
     background_qos();
     let batch: Batch = serde_json::from_slice(&fs::read(batch_file)?)?;
-    let ctx = Ctx::new(batch.target, HashCache::default())?;
-    let marker = drains_dir(ctx.store.root()).join(format!("{}.pid", std::process::id()));
+    let store_root = crate::store::Store::open()?.root().to_path_buf();
+    let marker = drains_dir(&store_root).join(format!("{}.pid", std::process::id()));
     fs::write(&marker, b"")?;
+    let _ = fs::remove_file(batch_file);
+    let result = process(batch);
+    let _ = fs::remove_file(marker);
+    result
+}
+
+fn process(batch: Batch) -> io::Result<()> {
+    let ctx = Ctx::new(batch.target, HashCache::default())?;
     let jobs = std::thread::available_parallelism().map_or(4, |n| n.get() / 2);
     ctx.run_puts(batch.jobs, jobs);
-    let _ = fs::remove_file(batch_file);
-    let _ = fs::remove_file(marker);
+    if let Some(plan_file) = batch.plan
+        && let Some(mut plan) = crate::plan::load(&plan_file)
+    {
+        plan.fill_snapshots(&ctx.store, &ctx.hc)?;
+        plan.save(&plan_file)?;
+    }
     Ok(())
 }
 
