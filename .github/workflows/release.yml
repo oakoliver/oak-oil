@@ -17,8 +17,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The same checks as CI, on both operating systems, before anything ships.
   verify:
-    runs-on: macos-15
+    strategy:
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     steps:
@@ -42,13 +46,23 @@ jobs:
       - run: cargo build --locked --release
       - run: python3 ci/oracle.py target/release/cargo-oil
 
-  binaries:
-    needs: verify
-    runs-on: macos-15
+  # One archive per target, each built on a native runner (the Intel macOS
+  # binary is cross-compiled on Apple Silicon). Archives travel to the
+  # release job as workflow artifacts; nothing is published here.
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-15, oracle: true }
+          - { target: x86_64-apple-darwin, os: macos-15, oracle: false }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, oracle: true }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, oracle: true }
+    runs-on: ${{ matrix.os }}
     permissions:
-      contents: write      # create the GitHub release
-      id-token: write      # sign the provenance attestation
-      attestations: write  # store it
+      contents: read
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,20 +70,66 @@ jobs:
 
       - name: Rust ${{ env.RUST_VERSION }}
         run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal --target aarch64-apple-darwin,x86_64-apple-darwin
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET"
           rustup default "$RUST_VERSION"
 
-      - name: Build and package
+      - run: cargo build --locked --release --target "$TARGET"
+
+      # The binary that ships, checked against stock Cargo where the runner
+      # can execute it.
+      - name: Oracle on the shipped binary
+        if: matrix.oracle
+        run: python3 ci/oracle.py "target/$TARGET/release/cargo-oil"
+
+      - name: glibc versions required
+        if: runner.os == 'Linux'
+        run: objdump -T "target/$TARGET/release/cargo-oil" | grep -o 'GLIBC_[0-9.]*' | sort -uV
+
+      - name: Package
         run: |
           mkdir dist
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --locked --release --target "$target"
-            name="cargo-oil-$GITHUB_REF_NAME-$target"
-            mkdir "$name"
-            cp "target/$target/release/cargo-oil" README.md LICENSE-MIT LICENSE-APACHE "$name/"
-            tar -czf "dist/$name.tar.gz" "$name"
+          name="cargo-oil-$GITHUB_REF_NAME-$TARGET"
+          mkdir "$name"
+          cp "target/$TARGET/release/cargo-oil" README.md LICENSE-MIT LICENSE-APACHE "$name/"
+          tar -czf "dist/$name.tar.gz" "$name"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  # Releases on this repository are immutable: the release is created once,
+  # with every asset, after every target has built and every check passed.
+  release:
+    needs: [verify, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write      # create the GitHub release
+      id-token: write      # sign the provenance attestation
+      attestations: write  # store it
+    steps:
+      # gh runs in a checkout of the tag, as it did before artifacts moved
+      # between jobs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: All archives present, checksums
+        run: |
+          cd dist
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            test -f "cargo-oil-$GITHUB_REF_NAME-$target.tar.gz" || { echo "missing $target"; exit 1; }
           done
-          cd dist && shasum -a 256 *.tar.gz > SHA256SUMS && cat SHA256SUMS
+          test "$(ls | wc -l)" -eq 4 || { ls; echo "unexpected files in dist"; exit 1; }
+          sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -88,7 +148,7 @@ jobs:
           Verify a download: \`gh attestation verify cargo-oil-${GITHUB_REF_NAME}-<target>.tar.gz --repo ${GITHUB_REPOSITORY}\`"
 
   crate:
-    needs: binaries
+    needs: release
     runs-on: macos-15
     environment: crates-io
     permissions:

@@ -143,16 +143,19 @@ cargo binstall cargo-oil       # or: download the prebuilt binary of the release
 cargo oil build
 ```
 
-Prebuilt macOS binaries (Apple Silicon and Intel) are on the
+Both work on macOS and Linux. Prebuilt binaries for macOS (Apple Silicon and
+Intel) and Linux (x86_64 and aarch64, glibc) are on the
 [releases page](https://github.com/oakoliver/oak-oil/releases); `cargo binstall`
-fetches them from there. Linux support is on `main` and not released yet:
-`cargo install --git https://github.com/oakoliver/oak-oil cargo-oil`.
+fetches them from there. The Linux and Apple Silicon binaries are built on
+runners of their own platform and pass the oracle (`ci/oracle.py`, above)
+before the release is created; the Intel macOS binary is cross-compiled on
+Apple Silicon.
 
 ## Where releases come from
 
 Every release is built and published by
 [`.github/workflows/release.yml`](.github/workflows/release.yml) from a
-`v*` tag, after the same checks as CI (lint, tests, and the oracle below):
+`v*` tag, after the same checks as CI (lint, tests, and the oracle above):
 
 - **Binaries** on the GitHub release carry a signed build provenance
   attestation linking them to the workflow run and commit:
