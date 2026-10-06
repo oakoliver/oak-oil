@@ -14,6 +14,10 @@ Cargo is itself byte-reproducible. Exits non-zero on the first violation.
 5. An edit, built by Oak Oil, is byte-identical to a stock build of it.
 6. `cargo oil clean --apply` keeps everything Cargo uses.
 7. After `cargo oil gc` empties the store, builds stay byte-identical.
+8. Store warm, target dir rebuilt by stock Cargo, then `cargo oil build`:
+   byte-identical, and stock Cargo recompiles nothing afterwards.
+9. `cargo oil test` builds what `cargo test` needs: stock `cargo test
+   --no-run` recompiles nothing afterwards, also after `rm -rf target`.
 """
 
 import hashlib
@@ -148,6 +152,49 @@ def main(oil, src):
         shutil.rmtree(target)
         stock()
         same(manifest(target), got, target, gc_target, "7. build after gc emptied the store")
+
+        # Stock Cargo owns the target dir, the store already has every unit:
+        # Oak Oil re-records over it and must leave Cargo's freshness intact.
+        shutil.rmtree(target)
+        stock()
+        ref = manifest(target)
+        mixed = tmp / "stock-snapshot-8"
+        shutil.copytree(target, mixed)
+        oil_build()
+        same(ref, manifest(target), mixed, target, "8. oil over a stock-built target (warm store)")
+        n = compiled(stock().stderr)
+        if n:
+            fail(f"8. stock Cargo recompiled {n} units after oil over a stock-built target")
+        print("ok: 8. stock Cargo recompiles nothing afterwards")
+
+        # Same with incremental workspace crates (the default dev build): their
+        # bytes differ between builds, so a re-record restores some units from
+        # the store and finds others identical in place. All must end up newer
+        # than their inputs, or stock Cargo rebuilds.
+        env_inc = {k: v for k, v in env.items() if k != "CARGO_INCREMENTAL"}
+        env_inc["CARGO_TARGET_DIR"] = str(tmp / "target-incremental")
+        run([oil, "build", "--locked"], ws, env_inc)
+        run([oil, "wait-store"], ws, env_inc)
+        shutil.rmtree(tmp / "target-incremental")
+        run(["cargo", "build", "--locked"], ws, env_inc)
+        run([oil, "build", "--locked"], ws, env_inc)
+        n = compiled(run(["cargo", "build", "--locked"], ws, env_inc).stderr)
+        if n:
+            fail(f"8. incremental: stock Cargo recompiled {n} units after oil over a stock-built target")
+        print("ok: 8. incremental: stock Cargo recompiles nothing afterwards")
+
+        test = lambda: (run([oil, "test", "--locked"], ws, env), run([oil, "wait-store"], ws, env))[0]
+        stock_test = lambda: run(["cargo", "test", "--locked", "--no-run"], ws, env)
+        test()
+        n = compiled(stock_test().stderr)
+        if n:
+            fail(f"9. stock cargo test recompiled {n} units after cargo oil test")
+        shutil.rmtree(target)
+        test()
+        n = compiled(stock_test().stderr)
+        if n:
+            fail(f"9. stock cargo test recompiled {n} units after cargo oil test from the store")
+        print("ok: 9. cargo oil test leaves nothing for cargo test to compile")
     print("oracle: all checks passed")
 
 

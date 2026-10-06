@@ -457,7 +457,12 @@ pub fn run_unit(
         .and_then(|mkey| ctx.store.lookup(mkey, t, &ctx.hc, &env_get));
     phase(1, t_lookup);
     if let Some(e) = found {
-        let outcome = if ctx.store.is_present(&e, &inv.out_dir, &ctx.hc) {
+        // Under Cargo (the wrapper) Cargo has decided this unit must be
+        // rebuilt and will expect its outputs to be newer than its inputs, so
+        // identical bytes already in place are restamped like a restore;
+        // only the executor may leave a present unit untouched.
+        let executor = matches!(echo, Echo::Rendered);
+        let outcome = if executor && ctx.store.is_present(&e, &inv.out_dir, &ctx.hc) {
             ctx.store.touch(&e.obj);
             Outcome::Fresh
         } else {

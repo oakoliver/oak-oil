@@ -21,6 +21,7 @@ byte-identical to what stock Cargo would produce.
 | `cargo oil build [ARGS]` | Builds like `cargo build [ARGS]`. The first run records Cargo's plan; later runs execute it without Cargo, restore unchanged units from the store, and compile the rest with stock rustc. |
 | `cargo oil clean [--apply]` | Finds build residue Cargo will never read again (superseded unit variants, old incremental sessions), removes it with `--apply`, then checks Cargo recompiles nothing. |
 | `cargo oil measure` | Reports bytes per kind of waste across every target dir on the machine. |
+| `cargo oil test [ARGS] [-- TEST ARGS]` | Builds exactly what `cargo test` needs through Oak Oil (the plan of `cargo test --no-run`), then runs `cargo test`, which finds every unit fresh. |
 | `cargo oil gc [--max-age-days N] [--max-size SIZE] [--dry-run]` | Trims the store: objects unused for 30 days, then least recently used until it fits 40 GiB. Also runs after builds, at most once a day. |
 | `cargo oil wait-store` | Waits for background store writes to finish. |
 

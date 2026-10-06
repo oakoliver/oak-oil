@@ -30,6 +30,8 @@ use std::time::Instant;
 const USAGE: &str = "\
 Usage:
   cargo oil build [--replan] [CARGO BUILD ARGS]...
+  cargo oil test [CARGO TEST ARGS]... [-- TEST ARGS]
+      Builds the test targets through Oak Oil, then runs `cargo test`.
       Runs the recorded plan with the Oak Oil executor (store hits, rmeta
       pipelining). Records the plan through Cargo when there is none or when
       manifests, lockfile, configs, toolchain or build-script inputs changed.
@@ -61,6 +63,7 @@ fn main() -> ExitCode {
     }
     match args.first().map(String::as_str) {
         Some("build") => build(&args[1..]),
+        Some("test") => test_cmd(&args[1..]),
         Some("clean") => clean_cmd(&args[1..]),
         Some("gc") => gc_cmd(&args[1..]),
         Some("store-drain") => match args.get(1).map(|f| drain::run(Path::new(f))) {
@@ -194,8 +197,91 @@ fn looks_like_rustc(a: &str) -> bool {
     })
 }
 
+/// `cargo oil test [ARGS] [-- TEST ARGS]`: executes the plan of
+/// `cargo test --no-run` (exactly the units `cargo test` needs, recorded
+/// separately from the `build` plan), then runs `cargo test ARGS`, which
+/// finds every unit fresh and only runs the tests (doctests still go through
+/// rustdoc, not the executor).
+fn test_cmd(rest: &[String]) -> ExitCode {
+    let mut cargo_args = vec!["test".to_string(), "--no-run".to_string()];
+    cargo_args.extend(test_build_args(rest));
+    let built = run_plan(cargo_args);
+    if built != ExitCode::SUCCESS {
+        return built;
+    }
+    match std::process::Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .arg("test")
+        .args(rest)
+        .status()
+    {
+        Ok(s) => ExitCode::from(s.code().map_or(1, |c| c.clamp(0, 255) as u8)),
+        Err(e) => {
+            eprintln!("oil: running cargo test: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The arguments of `cargo test` that also mean something to `cargo build`:
+/// options (and the values of those that take one), not test-name filters,
+/// test-only flags or anything after `--`.
+fn test_build_args(rest: &[String]) -> Vec<String> {
+    const WITH_VALUE: &[&str] = &[
+        "-p",
+        "--package",
+        "--exclude",
+        "-F",
+        "--features",
+        "--target",
+        "--target-dir",
+        "--profile",
+        "-j",
+        "--jobs",
+        "--manifest-path",
+        "--color",
+        "--config",
+        "-Z",
+        "--bin",
+        "--example",
+        "--test",
+        "--bench",
+        "--message-format",
+        "--lockfile-path",
+    ];
+    const TEST_ONLY: &[&str] = &[
+        "--no-run",
+        "--no-fail-fast",
+        "--doc",
+        "--future-incompat-report",
+    ];
+    let mut out = Vec::new();
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            break;
+        }
+        if TEST_ONLY.contains(&a.as_str()) || !a.starts_with('-') {
+            continue; // test-only flag or a TESTNAME filter
+        }
+        out.push(a.clone());
+        if WITH_VALUE.contains(&a.as_str())
+            && let Some(v) = it.next()
+        {
+            out.push(v.clone());
+        }
+    }
+    out
+}
+
 fn build(rest: &[String]) -> ExitCode {
-    match try_build(rest) {
+    let mut cargo_args = vec!["build".to_string()];
+    cargo_args.extend(rest.iter().cloned());
+    run_plan(cargo_args)
+}
+
+/// Records (when needed) and executes the plan of one Cargo command line.
+fn run_plan(cargo_args: Vec<String>) -> ExitCode {
+    match try_build(cargo_args) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("oil: {e}");
@@ -204,11 +290,10 @@ fn build(rest: &[String]) -> ExitCode {
     }
 }
 
-fn try_build(rest: &[String]) -> std::io::Result<ExitCode> {
+fn try_build(mut cargo_args: Vec<String>) -> std::io::Result<ExitCode> {
     let t0 = Instant::now();
-    let replan = rest.iter().any(|a| a == "--replan");
-    let mut cargo_args = vec!["build".to_string()];
-    cargo_args.extend(rest.iter().filter(|a| *a != "--replan").cloned());
+    let replan = cargo_args.iter().any(|a| a == "--replan");
+    cargo_args.retain(|a| a != "--replan");
     let cwd = std::env::current_dir()?;
     let store_root = store::Store::open()?.root().to_path_buf();
     let plan_file = plan::plan_path(&store_root, &cwd, &cargo_args);
@@ -340,5 +425,36 @@ fn clean_cmd(rest: &[String]) -> ExitCode {
             eprintln!("oil: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_build_args;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_args_keep_build_options_only() {
+        assert_eq!(
+            test_build_args(&v(&[
+                "-p",
+                "zflow-heft",
+                "--release",
+                "schedule",
+                "--no-fail-fast",
+                "--features",
+                "x",
+                "--",
+                "--nocapture"
+            ])),
+            v(&["-p", "zflow-heft", "--release", "--features", "x"])
+        );
+        assert_eq!(
+            test_build_args(&v(&["--workspace", "--exclude", "a"])),
+            v(&["--workspace", "--exclude", "a"])
+        );
     }
 }

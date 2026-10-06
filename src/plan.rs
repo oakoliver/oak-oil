@@ -205,6 +205,11 @@ pub fn record(
         let mut fps = Vec::new();
         let mut missing = 0;
         let mut to_force = Vec::new();
+        // Every unit's fingerprint dirs: a forced re-record forces them all.
+        // Forcing only the unrecorded ones leaves units Cargo still finds
+        // fresh (built by plain Cargo) with older outputs than dependencies
+        // restored from the store just now, so plain Cargo would rebuild them.
+        let mut all_fps = Vec::new();
         for a in &report.artifacts {
             let key = a.filenames.iter().find_map(|f| {
                 let k = record_key_of(f);
@@ -239,6 +244,13 @@ pub fn record(
                     .map(|p| crate::cargo_msgs::fingerprint_dirs_by_target(&p, &a.target_name))
                     .unwrap_or_default(),
             };
+            if a.fresh && std::env::var_os("OAKOIL_TRACE").is_some() {
+                eprintln!(
+                    "oil-trace: fresh {} key={:?} files={:?} fp={:?}",
+                    a.target_name, key, a.filenames, fp
+                );
+            }
+            all_fps.extend(fp.iter().cloned());
             match key {
                 Some(k) => {
                     live.insert(k);
@@ -268,7 +280,7 @@ pub fn record(
             return Ok(None);
         }
         forced = missing;
-        for d in &to_force {
+        for d in all_fps.iter().chain(&to_force) {
             let _ = fs::remove_dir_all(d);
         }
         attempt += 1;
