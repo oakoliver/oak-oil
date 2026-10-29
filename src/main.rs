@@ -340,6 +340,10 @@ fn try_build(mut cargo_args: Vec<String>) -> std::io::Result<ExitCode> {
     let hc_file = oil_dir.join("hashcache.json");
     let hc = HashCache::load(&hc_file);
     hc.allow_xattr(&target);
+    // Recording rewrites unit records; an older plan must not outlive a
+    // recording that fails or is interrupted, or it would replay those
+    // records under the conditions (env, for one) it was checked for.
+    let _ = std::fs::remove_file(&plan_file);
     let recorded = plan::record(&cwd, &cargo_args, &target, &hc)?;
     let _ = std::fs::create_dir_all(&oil_dir).and_then(|_| hc.save(&hc_file));
     let Some(rec) = recorded else {

@@ -15,7 +15,10 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const PLAN_VERSION: u32 = 8;
+/// 9: `watch_env` also holds every variable a unit read through
+/// `env!`/`option_env!` and every `rerun-if-env-changed` variable; plans
+/// recorded before cannot tell such a change, so they are re-recorded.
+const PLAN_VERSION: u32 = 9;
 
 #[derive(Serialize, Deserialize)]
 pub struct Plan {
@@ -29,6 +32,10 @@ pub struct Plan {
     pub uplifts: Vec<(PathBuf, PathBuf)>,
     pub watch_files: Vec<(PathBuf, String)>,
     pub watch_stamps: Vec<(PathBuf, u64, i64)>,
+    /// Process env at record time: Cargo and rustc settings, plus every
+    /// variable a unit read (rustc dep-info `# env-dep:`) or a build script
+    /// watches (`rerun-if-env-changed`). Units replay with the env recorded
+    /// for them, so any change here must go back through Cargo.
     pub watch_env: Vec<(String, Option<String>)>,
     /// Build-script run dirs (`build/<pkg>-<id>/`): restored before units run.
     pub build_runs: Vec<(PathBuf, String)>,
@@ -336,6 +343,17 @@ pub fn record(
             t_plan.elapsed().as_secs_f64()
         );
     }
+    let mut watch_env = watch_env;
+    for k in env_deps(&recs, &build_runs) {
+        if !watch_env.iter().any(|(n, _)| *n == k) {
+            let v = std::env::var(&k).ok();
+            watch_env.push((k, v));
+        }
+    }
+    watch_env.sort();
+    if trace {
+        eprintln!("oil-trace: env deps {:.3}s", t_plan.elapsed().as_secs_f64());
+    }
     let (watch_files, watch_stamps) = watch_inputs(cwd, target, hc)?;
     if trace {
         eprintln!(
@@ -368,6 +386,46 @@ pub fn record(
         plan,
         forced_units: forced,
     }))
+}
+
+/// Names of the variables the plan's outputs depend on beyond Cargo's own
+/// inputs: what each unit read with `env!`/`option_env!` (or a proc macro's
+/// tracked env), from rustc's dep-info, and what each build script asked to
+/// be re-run for (`cargo:rerun-if-env-changed`, in its `output`).
+fn env_deps(recs: &[Record], build_runs: &[(PathBuf, String)]) -> Vec<String> {
+    let mut names = HashSet::new();
+    for r in recs {
+        let Some(inv) = r.invocation() else { continue };
+        let Ok(text) = fs::read_to_string(inv.dep_info()) else {
+            continue;
+        };
+        names.extend(env_dep_names(&text));
+    }
+    for (dir, _) in build_runs {
+        if let Ok(text) = fs::read_to_string(dir.join("output")) {
+            names.extend(rerun_if_env_changed(&text));
+        }
+    }
+    let mut v: Vec<String> = names.into_iter().collect();
+    v.sort();
+    v
+}
+
+fn env_dep_names(dep_info: &str) -> impl Iterator<Item = String> + '_ {
+    dep_info.lines().filter_map(|l| {
+        let rest = l.strip_prefix("# env-dep:")?;
+        Some(rest.split_once('=').map_or(rest, |(k, _)| k).to_string())
+    })
+}
+
+fn rerun_if_env_changed(output: &str) -> impl Iterator<Item = String> + '_ {
+    output.lines().filter_map(|l| {
+        let rest = l
+            .strip_prefix("cargo::rerun-if-env-changed=")
+            .or_else(|| l.strip_prefix("cargo:rerun-if-env-changed="))?;
+        let k = rest.trim();
+        (!k.is_empty()).then(|| k.to_string())
+    })
 }
 
 /// Record key → record, for every unit the wrapper has seen in this target.
@@ -521,5 +579,25 @@ fn stamp_tree(dir: &Path, target: &Path, out: &mut Vec<(PathBuf, u64, i64)>) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_dep_and_rerun_names() {
+        let d =
+            "/t/a.d: src/main.rs\n\nsrc/main.rs:\n\n# env-dep:GIT_SHA=abc=def\n# env-dep:UNSET\n";
+        assert_eq!(
+            env_dep_names(d).collect::<Vec<_>>(),
+            vec!["GIT_SHA".to_string(), "UNSET".to_string()]
+        );
+        let o = "cargo:rustc-env=X=1\ncargo:rerun-if-env-changed=CC\ncargo::rerun-if-env-changed=PROTOC\n";
+        assert_eq!(
+            rerun_if_env_changed(o).collect::<Vec<_>>(),
+            vec!["CC".to_string(), "PROTOC".to_string()]
+        );
     }
 }

@@ -101,11 +101,21 @@ impl Store {
                     .is_ok_and(|now| &now == h)
             });
             let env_ok = e.env.iter().all(|(k, v)| env_get(k) == *v);
-            if inputs_ok && env_ok && self.object_dir(&e.obj).is_dir() {
+            if inputs_ok && env_ok && self.complete(&e) {
                 return Some(e);
             }
         }
         None
+    }
+
+    /// The entry's object holds every file it lists, and more than dep-info:
+    /// every compile leaves an artifact beside it. Older versions could store
+    /// an entry while a later build was rewriting the outputs (dep-info only),
+    /// or name files that an existing object of the same id lacked.
+    fn complete(&self, e: &Entry) -> bool {
+        let obj = self.object_dir(&e.obj);
+        e.files.iter().any(|(n, _)| !n.ends_with(".d"))
+            && e.files.iter().all(|(n, _)| obj.join(n).is_file())
     }
 
     /// True when `out_dir` already holds exactly this entry's outputs.
@@ -165,7 +175,10 @@ impl Store {
         }
     }
 
-    /// Store the outputs of a finished compile under `mkey`.
+    /// Store the outputs of a finished compile under `mkey`. With
+    /// `not_after`, an output modified after that time (rewritten by a later
+    /// compile) aborts the put with `ErrorKind::Interrupted`; it is checked
+    /// after each file is read, so the bytes stored are the compile's own.
     #[allow(clippy::too_many_arguments)]
     pub fn put(
         &self,
@@ -176,10 +189,23 @@ impl Store {
         stderr: Vec<String>,
         target: &str,
         hc: &HashCache,
+        not_after: Option<SystemTime>,
     ) -> io::Result<Entry> {
+        let unchanged = |p: &Path| -> io::Result<()> {
+            match not_after {
+                Some(end) if fs::metadata(p)?.modified()? > end => Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    format!("{} rewritten since its compile", p.display()),
+                )),
+                _ => Ok(()),
+            }
+        };
+        // The output names are part of the id: an existing object of this id
+        // then holds the same files (older versions left it out).
+        let names: Vec<_> = outputs.iter().filter_map(|p| p.file_name()).collect();
         let obj = hash_bytes(
             format!(
-                "{mkey}\n{}",
+                "{mkey}\n{}\n{names:?}",
                 serde_json::to_string(&(&inputs, &env)).unwrap_or_default()
             )
             .as_bytes(),
@@ -194,6 +220,7 @@ impl Store {
                 } else {
                     hc.get(p)?
                 };
+                unchanged(p)?;
                 files.push((name, h));
             }
         } else {
@@ -203,15 +230,23 @@ impl Store {
                 .join(format!("{obj}.{}", std::process::id()));
             let _ = fs::remove_dir_all(&tmp);
             fs::create_dir_all(&tmp)?;
-            for p in outputs {
-                let name = p.file_name().unwrap().to_string_lossy().to_string();
-                if name.ends_with(".d") {
-                    fs::write(tmp.join(&name), norm(&fs::read_to_string(p)?, target))?;
-                    files.push((name, String::new()));
-                } else {
-                    fs::copy(p, tmp.join(&name))?;
-                    files.push((name, hc.get(p)?));
+            let copied = (|| -> io::Result<()> {
+                for p in outputs {
+                    let name = p.file_name().unwrap().to_string_lossy().to_string();
+                    if name.ends_with(".d") {
+                        fs::write(tmp.join(&name), norm(&fs::read_to_string(p)?, target))?;
+                        files.push((name, String::new()));
+                    } else {
+                        fs::copy(p, tmp.join(&name))?;
+                        files.push((name, hc.get(p)?));
+                    }
+                    unchanged(p)?;
                 }
+                Ok(())
+            })();
+            if let Err(e) = copied {
+                let _ = fs::remove_dir_all(&tmp);
+                return Err(e);
             }
             fs::create_dir_all(final_dir.parent().unwrap())?;
             if fs::rename(&tmp, &final_dir).is_err() {
@@ -316,4 +351,63 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn put_skips_outputs_rewritten_after_the_compile() {
+        let base = std::env::temp_dir().join(format!("oil-store-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let root = base.join("store");
+        for d in ["objects", "manifests", "tmp"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let store = Store { root };
+        let out = base.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let bin = out.join("app-0123456789abcdef");
+        fs::write(&bin, b"compile 1").unwrap();
+        let end = SystemTime::now();
+        // A later compile rewrites the output before the drain stores it.
+        File::options()
+            .write(true)
+            .open(&bin)
+            .unwrap()
+            .set_modified(end + Duration::from_secs(5))
+            .unwrap();
+        let hc = HashCache::default();
+        let t = base.to_string_lossy().to_string();
+        let put = |not_after| {
+            store.put(
+                "mkey",
+                vec![],
+                vec![("X".into(), Some("1".into()))],
+                std::slice::from_ref(&bin),
+                vec![],
+                &t,
+                &hc,
+                not_after,
+            )
+        };
+        let err = put(Some(end)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert!(
+            store
+                .lookup("mkey", &t, &hc, &|_| Some("1".into()))
+                .is_none()
+        );
+        assert_eq!(fs::read_dir(store.root.join("tmp")).unwrap().count(), 0);
+        // Without a bound (jobs spooled by older versions) it stores.
+        put(None).unwrap();
+        assert!(
+            store
+                .lookup("mkey", &t, &hc, &|_| Some("1".into()))
+                .is_some()
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
 }

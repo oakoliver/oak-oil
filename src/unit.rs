@@ -494,6 +494,7 @@ pub fn run_unit(
         js.release();
     }
     let (status, lines, meta_sent) = result?;
+    let end = SystemTime::now();
     phase(3, t_rustc);
     let t_store = std::time::Instant::now();
     if !status.success() {
@@ -550,6 +551,7 @@ pub fn run_unit(
             dep_info: inv.dep_info(),
             stderr: lines.iter().map(|l| norm(l, t)).collect(),
             start,
+            end: Some(end),
         };
         match ctx.deferred.lock().unwrap().as_mut() {
             Some(queue) => queue.push(job),
@@ -575,6 +577,12 @@ pub struct PutJob {
     /// When rustc started: an input modified after this may not be what
     /// rustc read, so the result is not stored.
     start: SystemTime,
+    /// When rustc finished: an output modified after this was rewritten by a
+    /// later compile (store writes run in the background, and the next build
+    /// may already be rebuilding the unit, e.g. for a changed env var), so
+    /// the result is not stored. `None` in jobs spooled by older versions.
+    #[serde(default)]
+    end: Option<SystemTime>,
 }
 
 impl Ctx {
@@ -628,7 +636,9 @@ impl Ctx {
         let mut exact = !job.artifacts.is_empty();
         for a in &job.artifacts {
             if !a.is_file() {
-                continue;
+                // Gone since the compile (a later build is rewriting it):
+                // storing the rest would make an entry without it.
+                return Err(io::Error::new(io::ErrorKind::NotFound, "output gone"));
             }
             out.insert(a.clone());
             match a.extension().and_then(|e| e.to_str()) {
@@ -672,7 +682,11 @@ impl Ctx {
 
     pub fn complete_put(&self, job: PutJob) -> io::Result<()> {
         let t = self.target_s.as_str();
-        let mut outputs = self.unit_outputs(&job)?;
+        // The store is a cache: a compile whose outputs changed since is
+        // skipped, never stored partially or with another compile's bytes.
+        let Ok(mut outputs) = self.unit_outputs(&job) else {
+            return Ok(());
+        };
         outputs.sort();
         let mut inputs = Vec::with_capacity(job.inputs.len());
         for f in &job.inputs {
@@ -687,9 +701,16 @@ impl Ctx {
         }
         self.store
             .put(
-                &job.mkey, inputs, job.env, &outputs, job.stderr, t, &self.hc,
+                &job.mkey, inputs, job.env, &outputs, job.stderr, t, &self.hc, job.end,
             )
             .map(drop)
+            .or_else(|e| {
+                if e.kind() == io::ErrorKind::Interrupted {
+                    Ok(()) // outputs rewritten during the put: not stored
+                } else {
+                    Err(e)
+                }
+            })
     }
 }
 

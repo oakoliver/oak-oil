@@ -59,6 +59,11 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         }
         Err(e) => {
             eprintln!("oil: {e}; running rustc directly");
+            // A record left from an earlier build would no longer describe
+            // this unit (its env, for one): without it the plan is not saved.
+            let _ = std::fs::remove_file(
+                crate::unit::records_dir(&target).join(format!("{}.json", rec.key)),
+            );
             passthrough(&rustc, &args)
         }
     }

@@ -56,7 +56,9 @@ recompiled nothing. More detail: [docs/findings.md](docs/findings.md).
 1. **Plan.** The first `cargo oil build` runs stock Cargo with Oak Oil as
    `RUSTC_WRAPPER` and records every rustc invocation (command, env,
    outputs). The plan is rebuilt only when manifests, the lockfile, configs,
-   the toolchain, env or build-script inputs change.
+   the toolchain, env or build-script inputs change. Env includes every
+   variable a crate reads with `env!`/`option_env!` (from rustc's dep-info)
+   and every `rerun-if-env-changed` variable of a build script.
 2. **Execute.** Later builds run the plan with Oak Oil's scheduler:
    `.rmeta` pipelining, a Cargo-style jobserver, critical path first.
 3. **Freshness.** A unit whose inputs and outputs are unchanged (size,
